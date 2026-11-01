@@ -1,4 +1,4 @@
-# v0.1.70 — maintained Stig fork
+# v0.1.71 — maintained Stig fork
 
 - Persist rotated Aula credentials so they survive Home Assistant restarts.
 - Recover expired widget JWTs with one bounded OAuth refresh and retry.

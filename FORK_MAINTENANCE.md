@@ -1,7 +1,7 @@
 # Maintaining this fork
 
 The default maintained branch is `stig`. The fork retains upstream history and the
-`aula` integration domain. The first fork release, v0.1.70, starts from upstream's
+`aula` integration domain. The first fork release, v0.1.71, starts from upstream's
 stable v0.1.69 plus the reviewed authentication and EasyIQ weekly-text changes.
 The manifest also adopts upstream's compatible Beautiful Soup minimum and avoids
 redeclaring requests, which Home Assistant already supplies.
@@ -43,7 +43,7 @@ The release workflow builds the tagged commit, not an unreviewed default-branch
 checkout. It never rewrites source files or pushes a manifest update after testing.
 
 1. Push the reviewed `stig` commit and wait for CI/code validation to pass.
-2. Create and push a matching tag, e.g. `v0.1.70`.
+2. Create and push a matching tag, e.g. `v0.1.71`.
 3. Run the **Release maintained fork** workflow on `stig` with that tag.
    It tests the exact tag, checks the committed manifest version, and publishes
    `aula.zip` plus `SHA256SUMS`.
