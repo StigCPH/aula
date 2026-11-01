@@ -1,5 +1,7 @@
 from homeassistant.loader import async_get_integration
 import asyncio
+import base64
+import json
 from homeassistant import config_entries, core
 from homeassistant.helpers import entity_registry as er
 from .const import (
@@ -60,6 +62,9 @@ async def async_setup_entry(
         )
 
     hass_data = dict(entry.data)
+    # Track the configuration actually applied, separately from token-only saves.
+    hass_data["_applied_entry_data"] = dict(entry.data)
+    hass_data["_applied_entry_options"] = dict(entry.options)
     hass_data[CONF_MITID_USERNAME] = mitid_username
     hass_data[CONF_AUTH_METHOD] = auth_method
     hass_data[CONF_MITID_PASSWORD] = mitid_password
@@ -134,32 +139,57 @@ async def async_setup_entry(
 async def async_update_tokens(
     hass: core.HomeAssistant, entry: config_entries.ConfigEntry, tokens: dict
 ):
-    """Update tokens in runtime storage only.
+    """Persist rotated tokens through HA's config-entry API without reloading."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime is None:
+        _LOGGER.warning("Cannot persist refreshed tokens for an unloaded Aula entry")
+        return
 
-    This function updates tokens in runtime storage (hass.data) which does NOT
-    trigger config entry reload cycles. Tokens in entry.data are only updated
-    during reauth flows (user-initiated), which is handled in config_flow.py.
+    # Snapshot before awaiting anything: the login client mutates this mapping.
+    snapshot = tokens.copy()
+    if not snapshot.get("access_token") or not snapshot.get("refresh_token"):
+        raise ValueError("Refreshed Aula token state is incomplete")
 
-    Args:
-        hass: Home Assistant instance
-        entry: Config entry
-        tokens: Dictionary containing refreshed tokens
-    """
-    # Update runtime storage only - this does NOT trigger reload cycles
-    if entry.entry_id in hass.data.get(DOMAIN, {}):
-        hass.data[DOMAIN][entry.entry_id]["tokens"] = tokens.copy()
-        _LOGGER.debug("Tokens updated in runtime storage (no reload triggered)")
-    else:
-        _LOGGER.warning(
-            f"Runtime storage not available for entry {entry.entry_id}, "
-            "cannot update tokens in runtime storage"
-        )
+    expires_at = snapshot.get("expires_at", 0)
+    try:
+        payload = snapshot["access_token"].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        expires_at = claims.get("exp", expires_at)
+    except (IndexError, ValueError, TypeError, UnicodeError):
+        pass
+    snapshot["expires_at"] = expires_at
+    updates = {
+        CONF_ACCESS_TOKEN: snapshot["access_token"],
+        CONF_REFRESH_TOKEN: snapshot["refresh_token"],
+        CONF_TOKEN_EXPIRES_AT: expires_at,
+    }
+
+    # Only advance token fields in the applied baseline. A simultaneous feature
+    # or options change must still trigger its normal reload.
+    baseline = dict(runtime.get("_applied_entry_data", entry.data))
+    baseline.update(updates)
+    previous_baseline = runtime.get("_applied_entry_data")
+    runtime["_applied_entry_data"] = baseline
+    try:
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **updates})
+    except Exception:
+        runtime["_applied_entry_data"] = previous_baseline
+        raise
+    runtime["tokens"] = snapshot
+    runtime["stored_tokens"] = snapshot.copy()
+    _LOGGER.debug("Refreshed Aula tokens persisted without reloading")
 
 
 async def options_update_listener(
     hass: core.HomeAssistant, config_entry: config_entries.ConfigEntry
 ):
-    """Handle options update."""
+    """Reload configuration/reauth changes, but not our own token-only saves."""
+    runtime = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if runtime is not None and (
+        config_entry.data == runtime.get("_applied_entry_data")
+        and config_entry.options == runtime.get("_applied_entry_options")
+    ):
+        return
     await hass.config_entries.async_reload(config_entry.entry_id)
 
 

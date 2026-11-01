@@ -1,39 +1,49 @@
-name: Release
+name: Release maintained fork
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
+    inputs:
+      tag:
+        description: Existing reviewed tag matching the committed manifest version
+        required: true
+        type: string
 
-env:
-  COMPONENT_DIR: aula
+permissions:
+  contents: write
 
 jobs:
-  release_zip_file:
-    name: Prepare release asset
+  release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Update manifest.json version to ${{ github.event.release.tag_name }}
-        run: |
-          python3 ${{ github.workspace }}/.github/scripts/update_hacs_manifest.py --version ${{ github.event.release.tag_name }} --path /custom_components/aula/
-      - name: Commit manifest update
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add ./custom_components/aula/manifest.json
-          git commit -m "Updated manifest.json"
-          git push origin HEAD:refs/heads/main
-      - name: Create zip
-        run: |
-          cd custom_components/aula
-          zip aula.zip -r ./
-      - name: Upload zip to release
-        uses: svenstaro/upload-release-action@2.9.0
+      - uses: actions/checkout@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./custom_components/aula/aula.zip
-          asset_name: aula.zip
-          tag: ${{ github.ref }}
-          overwrite: true
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Verify release identity
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "${{ github.repository }}" = "StigCPH/aula"
+          test "${{ github.ref_name }}" = "stig"
+          git fetch origin stig
+          git merge-base --is-ancestor HEAD origin/stig
+          test "$(git describe --tags --exact-match)" = "$RELEASE_TAG"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt -r requirements.test.txt
+      - name: Test the tagged source
+        run: python -m pytest --tb=short -v
+      - name: Build the HACS package
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python scripts/build_release.py --tag "$RELEASE_TAG"
+      - name: Publish immutable source package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/aula.zip dist/SHA256SUMS \
+            --verify-tag --title "Aula (Stig fork) $RELEASE_TAG" \
+            --notes-file RELEASE_NOTES.md

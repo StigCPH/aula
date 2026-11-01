@@ -1,6 +1,23 @@
 [![Current Release](https://img.shields.io/github/release/scaarup/aula/all.svg?style=plastic)](https://github.com/scaarup/aula/releases) [![Github All Releases](https://img.shields.io/github/downloads/scaarup/aula/total.svg?style=plastic)](https://github.com/scaarup/aula/releases) [![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=plastic)](https://github.com/hacs/integration)
 
-# Aula
+# Aula (Stig fork)
+
+Maintained fork of [scaarup/aula](https://github.com/scaarup/aula), based on stable v0.1.69.
+The maintained branch is **stig**. HACS installations must follow **StigCPH/aula**.
+
+This fork preserves refreshed login credentials across restarts, recovers expired widget
+tokens with one bounded OAuth refresh, and includes EasyIQ's **Generelt om ugen** text
+in the existing weekplan sensor attributes and calendars. No account or entity migration
+is needed: the integration domain remains `aula`.
+
+Install only one repository providing the `aula` domain. Installing or updating the
+original repository will replace the fork's files. During migration, replace only the
+HACS download; keep the existing Aula entry in Settings > Devices & Services.
+
+See [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md) for installation, releases, upstream
+updates, regression checks and rollback. Public tests use fictitious data only.
+
+## Original project documentation
 
 This is a custom component for Home Assistant to integrate Aula.
 

@@ -116,6 +116,59 @@ def is_ugeplan_all_day(value):
     return value == 1
 
 
+def easyiq_weekplan_events(payload, week):
+    """Map EasyIQ's separate weekly text into existing all-day notice rows."""
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("Show") is True:
+        plans = [payload]
+    else:
+        plans = payload.get("WeekPlans", [])
+    if not isinstance(plans, list):
+        return []
+    year, number = week.split("-W")
+    monday = datetime.date.fromisocalendar(int(year), int(number), 1)
+    allowed = {"p", "br", "strong", "b", "em", "i", "u", "ul", "ol", "li",
+               "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody",
+               "tr", "td", "th", "blockquote", "a", "hr"}
+    events = []
+    for plan in plans:
+        if not isinstance(plan, dict) or plan.get("IsVisible") is False:
+            continue
+        raw = plan.get("Text")
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        soup = BeautifulSoup(html.unescape(raw), "html.parser")
+        for tag in list(soup.find_all(["script", "style", "iframe", "object", "embed",
+                                       "form", "input", "button", "meta", "link"])):
+            tag.decompose()
+        for tag in list(soup.find_all(True)):
+            if tag.name not in allowed:
+                tag.unwrap()
+                continue
+            href = tag.get("href") if tag.name == "a" else None
+            tag.attrs = {}
+            if isinstance(href, str) and urllib.parse.urlsplit(href.strip()).scheme.lower() in {"https", "http", "mailto"}:
+                tag["href"] = href.strip()
+        if not soup.get_text(strip=True):
+            continue
+        title = plan.get("Beskrivelse") or payload.get("Beskrivelse") or "Weekly information"
+        title = BeautifulSoup(str(title), "html.parser").get_text(" ", strip=True)
+        activity = plan.get("ActivityName")
+        if activity:
+            activity = BeautifulSoup(str(activity), "html.parser").get_text(" ", strip=True)
+            title += " (" + activity + ")"
+        events.append({
+            "Title": title,
+            "Description": str(soup),
+            "StartTime": monday.isoformat() + "T00:00:00",
+            # Existing calendar conversion treats EndTime as an inclusive date.
+            "EndTime": (monday + datetime.timedelta(days=6)).isoformat() + "T00:00:00",
+            "IsAllDay": True,
+        })
+    return events
+
+
 class Client:
     huskeliste = {}
     presence = {}
@@ -672,31 +725,57 @@ class Client:
         _LOGGER.info("Widgets found: " + str(self.widgets))
 
     def get_token(self, widgetid, mock=False):
+        """Fetch a live widget JWT, refreshing the Aula session at most once."""
+        def is_live(token):
+            try:
+                raw = token.removeprefix("Bearer ")
+                payload = raw.split(".")[1]
+                claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+                return float(claims["exp"]) > datetime.datetime.now(pytz.utc).timestamp() + 30
+            except (AttributeError, IndexError, KeyError, ValueError, TypeError, UnicodeError):
+                return False
+
         if widgetid in self.tokens:
             token, timestamp = self.tokens[widgetid]
-            current_time = datetime.datetime.now(pytz.utc)
-            if current_time - timestamp < datetime.timedelta(minutes=1):
-                _LOGGER.debug("Reusing existing token for widget " + widgetid)
+            if (
+                datetime.datetime.now(pytz.utc) - timestamp < datetime.timedelta(minutes=1)
+                and is_live(token)
+            ):
                 return token
         if mock:
             return "MockToken"
 
-        _LOGGER.debug("Requesting new token for widget " + widgetid)
-        token_response = self._session.get(
-            self.apiurl
-            + "?method=aulaToken.getAulaToken&widgetId="
-            + widgetid
-            + self._get_access_token_param(),
-            verify=True,
-        ).json()
-        self._bearertoken = token_response.get("data") if token_response else None
-        if not self._bearertoken:
-            _LOGGER.warning(f"Could not get token for widget {widgetid}")
-            return None
-
-        token = "Bearer " + str(self._bearertoken)
-        self.tokens[widgetid] = (token, datetime.datetime.now(pytz.utc))
-        return token
+        for attempt in range(2):
+            token_response = self._session.get(
+                self.apiurl
+                + "?method=aulaToken.getAulaToken&widgetId="
+                + widgetid
+                + self._get_access_token_param(),
+                verify=True,
+            ).json()
+            raw_token = token_response.get("data") if token_response else None
+            if not raw_token:
+                _LOGGER.warning("Could not get token for widget %s", widgetid)
+                return None
+            if is_live(raw_token):
+                token = "Bearer " + raw_token
+                self._bearertoken = raw_token
+                self.tokens[widgetid] = (token, datetime.datetime.now(pytz.utc))
+                return token
+            self.tokens.pop(widgetid, None)
+            if attempt == 0:
+                _LOGGER.info("Widget %s token expired; refreshing the Aula session once", widgetid)
+                previous_session = self._session
+                self._session = None
+                try:
+                    self.login(force_refresh=True)
+                except Exception:
+                    self._session = previous_session
+                    raise
+                self.tokens.clear()
+            else:
+                _LOGGER.warning("Aula returned an expired widget %s token after refresh", widgetid)
+        return None
 
     def _ensure_valid_token(self):
         """Ensure we have a valid access token, refresh if needed.
@@ -1274,6 +1353,28 @@ class Client:
                                     _LOGGER.debug("EasyIQ Skoleportal returned non-200 response for %s: %r", first_name, events_resp.text[:200])
                         except Exception as err:
                             _LOGGER.warning("EasyIQ Skoleportal API call failed for %s: %s", first_name, err)
+
+                        # The general weekly message is separate from calendar lessons.
+                        # Fetch it independently so a lesson timeout cannot hide the note.
+                        if login_id:
+                            try:
+                                week_response = easyiq_session.get(
+                                    EASYIQ_SKOLEPORTAL_API + "/Calendar/WeekPlan",
+                                    headers=easyiq_headers,
+                                    params={
+                                        "loginId": str(login_id),
+                                        "activityFilter": str(activity_filter or "-1"),
+                                        "date": target_date,
+                                    },
+                                    verify=True,
+                                    timeout=10,
+                                )
+                                week_response.raise_for_status()
+                                week_notes = easyiq_weekplan_events(week_response.json(), week)
+                                events_list.extend(week_notes)
+                                skoleportal_success = skoleportal_success or bool(week_notes)
+                            except Exception as err:
+                                _LOGGER.warning("EasyIQ general weekplan fetch failed for %s: %s", first_name, err)
 
                         if skoleportal_success:
                             week_num_str = week.split("-W")[-1] if "-W" in week else week
